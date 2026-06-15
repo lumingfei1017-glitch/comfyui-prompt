@@ -1,5 +1,14 @@
 [project]
 name = "comfyui-prompt"
 version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "Pillow",
+    "numpy",
+    "requests",
+    "huggingface_hub",
+    "opencv-python",
+    "qwen-vl-utils",
+]
