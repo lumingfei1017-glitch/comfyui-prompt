@@ -1,464 +1,179 @@
 import os
 import json
-import torch
+import base64
+import io
 import numpy as np
 from PIL import Image
 import folder_paths
-from .model_manager import ModelManager
-
-# Qwen2.5-VL 使用 AutoProcessor 而非 AutoTokenizer
-from transformers import AutoProcessor
-from qwen_vl_utils import process_vision_info
+import requests as req
 
 
-class QwenModelLoaderNode:
-    """加载 Qwen2.5-VL 模型节点"""
+# ========== 模板定义 ==========
+# 根据提示词模板.txt 提取的各任务类型系统提示词
 
-    def __init__(self):
-        self.model_manager = ModelManager()
+SYSTEM_PROMPTS = {
+    "t2i": """You are a helpful assistant specialized in text-to-image generation.
+你是一位电影导演，旨在为用户输入的原始prompt添加电影元素，改写为优质（英文）Prompt，使其完整、具有表现力。注意，输出必须是英文！
+本任务为文生图 (text-to-image)，请按下列电影美学规则改写为静态图像 prompt。图像里没有时间序列，不要描述运动/摄像机运动/动作过程，只描写场景与主体的静态状态。其余电影美学（光源/光线强度/色调/镜头大小/拍摄角度/构图）按下文规则保留。
 
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model_type": (["qwen2.5-vl-7b-instruct"], {
-                    "default": "qwen2.5-vl-7b-instruct"
-                }),
-            },
-            "optional": {
-                "device_map": (["auto", "cpu", "cuda"], {
-                    "default": "auto"
-                }),
-                "precision": (["float16", "bfloat16", "float32"], {
-                    "default": "float16"
-                }),
-            }
-        }
+任务要求：
+1. 对于用户输入的prompt，在不改变prompt的原意（如主体、动作）前提下，从下列电影美学设定中选择不超过4种合适的时间、光源、光线强度、光线角度、对比度、饱和度、色调、拍摄角度、镜头大小、构图的电影设定细节，将这些内容添加到prompt中，让画面变得更美。可以任选，不必每项都有：
+  时间：["Day time", "Night time", "Dawn time", "Sunrise time"]，如果prompt没有特别说明则选 Day time
+  光源：["Daylight", "Artificial lighting", "Moonlight", "Practical lighting", "Firelight", "Fluorescent lighting", "Overcast lighting", "Sunny lighting"]，根据室内室外及prompt内容选定义光源
+  光线强度：["Soft lighting", "Hard lighting"]
+  色调：["Warm colors", "Cool colors", "Mixed colors"]
+  光线角度：["Top lighting", "Side lighting", "Underlighting", "Edge lighting"]
+  镜头尺寸：["Medium shot", "Medium close-up shot", "Wide shot", "Medium wide shot", "Close-up shot", "Extreme close-up shot", "Extreme wide shot"]，若无特殊要求默认Medium shot或Wide shot
+  拍摄角度：["Over-the-shoulder shot", "Low angle shot", "High angle shot", "Dutch angle shot", "Aerial shot", "Overhead shot"]
+  构图：["Center composition", "Balanced composition", "Right-heavy composition", "Left-heavy composition", "Symmetrical composition", "Short-side composition"]，若无特殊要求默认Center composition
+2. 完善用户描述中出现的主体特征（外貌、表情、数量、种族、姿态等），确保不要添加原始prompt中不存在的主体，增加背景元素的细节
+3. 不要输出关于氛围、感觉等文学描写
+4. 不要描述运动/摄像机运动/动作过程，只描写主体和背景的静态状态、姿态、表情、构图等
+5. 若原始prompt中没有风格，则不添加风格描述；若有风格描述，则将风格描述放于首位；若为2D插画等与现实电影相悖的风格，则不要添加关于电影美学的描写
+6. 若prompt出现天空的描述，则改为湛蓝色的天空相关描述，避免曝光
+7. 输出必须是全英文，改写后的prompt字数控制在60-200字左右，不要输出类似"改写后prompt:"这样的前缀""",
 
-    RETURN_TYPES = ("QWEN_MODEL",)
-    RETURN_NAMES = ("model",)
-    FUNCTION = "load_model"
-    CATEGORY = "QwenCLIP"
+    "t2v": """You are a helpful assistant specialized in text-to-video generation.
+你是一位电影导演，旨在为用户输入的原始prompt添加电影元素，改写为优质（英文）Prompt，使其完整、具有表现力。注意，输出必须是英文！
 
-    def load_model(self, model_type, device_map="auto", precision="float16"):
-        """加载模型并返回模型对象"""
-        try:
-            # 获取模型路径
-            model_path = self.model_manager.get_model_path(model_type)
-            if not model_path:
-                print(f"模型未找到，开始下载: {model_type}")
-                model_path = self.model_manager.download_model(model_type)
+任务要求：
+1. 对于用户输入的prompt，在不改变prompt的原意（如主体、动作）前提下，从下列电影美学设定中选择不超过4种合适的时间、光源、光线强度、光线角度、对比度、饱和度、色调、拍摄角度、镜头大小、构图的电影设定细节，将这些内容添加到prompt中，让画面变得更美。可以任选，不必每项都有：
+  时间：["Day time", "Night time", "Dawn time", "Sunrise time"]，如果prompt没有特别说明则选 Day time
+  光源：["Daylight", "Artificial lighting", "Moonlight", "Practical lighting", "Firelight", "Fluorescent lighting", "Overcast lighting", "Sunny lighting"]，根据室内室外及prompt内容选定义光源
+  光线强度：["Soft lighting", "Hard lighting"]
+  色调：["Warm colors", "Cool colors", "Mixed colors"]
+  光线角度：["Top lighting", "Side lighting", "Underlighting", "Edge lighting"]
+  镜头尺寸：["Medium shot", "Medium close-up shot", "Wide shot", "Medium wide shot", "Close-up shot", "Extreme close-up shot", "Extreme wide shot"]，若无特殊要求默认Medium shot或Wide shot
+  拍摄角度：["Over-the-shoulder shot", "Low angle shot", "High angle shot", "Dutch angle shot", "Aerial shot", "Overhead shot"]
+  构图：["Center composition", "Balanced composition", "Right-heavy composition", "Left-heavy composition", "Symmetrical composition", "Short-side composition"]，若无特殊要求默认Center composition
+2. 完善用户描述中出现的主体特征（外貌、表情、数量、种族、姿态等），确保不要添加原始prompt中不存在的主体，增加背景元素的细节
+3. 不要输出关于氛围、感觉等文学描写
+4. 对于prompt中的动作，详细描述运动的发生过程，若没有动作则添加动作描述（摇晃身体、跳舞等），对背景元素也可添加适当运动（如云彩飘动、风吹树叶等）
+5. 若原始prompt中没有风格，则不添加风格描述；若有风格描述，则将风格描述放于首位；若为2D插画等与现实电影相悖的风格，则不要添加关于电影美学的描写
+6. 若prompt出现天空的描述，则改为湛蓝色的天空相关描述，避免曝光
+7. 输出必须是全英文，改写后的prompt字数控制在60-200字左右，不要输出类似"改写后prompt:"这样的前缀""",
 
-            print(f"正在加载模型: {model_path}")
+    "i2i": """You are a helpful assistant specialized in image editing.
+Task: Image Editing
+# ROLE
+You are an expert Image-to-Image (I2I) Prompt Engineer. Your task is to analyze the user's raw editing instruction and the provided source image to generate a detailed I2I editing prompt in English.
 
-            # 导入模型类
-            from transformers import Qwen2_5_VLForConditionalGeneration
+# CORE GENERATION RULE
+Unless specified otherwise by the task type, your generated prompt MUST strictly follow this two-part structure:
+1. Modifications: Specifically describe what needs to be changed.
+2. Preservations: Explicitly describe the key visual elements, background, or subjects that MUST remain unchanged.
+3. Concretization: If the user's instruction contains vague references, you MUST replace them with specific, well-known, named instances.
 
-            # 加载处理器（Qwen2.5-VL 使用 Processor 而非 Tokenizer）
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+# OUTPUT REQUIREMENT
+Output ONLY the final enhanced English prompt. Do not include any explanations, greetings, or the category name.
+Do not imagine things that do not appear in the image.""",
 
-            # 创建卸载目录
-            offload_folder = os.path.join(os.path.dirname(model_path), "offload")
-            os.makedirs(offload_folder, exist_ok=True)
+    "r2i": """You are an expert at writing subject-driven image generation prompts. I'm providing you with reference image(s) of the subject(s) that will appear in the generated image.
 
-            # 根据精度设置dtype
-            dtype_map = {
-                "float16": torch.float16,
-                "bfloat16": torch.bfloat16,
-                "float32": torch.float32
-            }
-            torch_dtype = dtype_map.get(precision, torch.float16)
+Your task is to analyze the reference image(s) and generate a detailed prompt for subject-driven image generation:
 
-            # 尝试加载模型
-            model = None
-            try:
-                print(f"尝试以 Qwen2_5_VLForConditionalGeneration 加载...")
-                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    model_path,
-                    device_map=device_map,
-                    offload_folder=offload_folder,
-                    torch_dtype=torch_dtype,
-                    trust_remote_code=True,
-                    use_safetensors=True
-                ).eval()
-                print("模型已加载（Qwen2_5_VLForConditionalGeneration）")
-            except Exception as e:
-                # 尝试从 Hub 加载
-                print(f"本地加载失败，尝试从 Hugging Face Hub 加载: {e}")
-                model_name = os.path.basename(model_path)
-                hub_model_id = f"Qwen/{model_name}"
+**Requirements:**
+- Describe the subject(s) from the reference image(s) with detailed appearance (hair, clothing, accessories, expression, etc.)
+- Describe the scene/environment in detail (background, lighting, objects, atmosphere)
+- Describe the composition, framing, and visual emphasis
+- The appearance description of each subject must be based on what you actually see in the reference image(s). Do NOT hallucinate details not visible in the images
+- The output must be entirely in English
+- Output ONLY the final enhanced English prompt. No extra text.""",
 
-                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    hub_model_id,
-                    device_map=device_map,
-                    offload_folder=offload_folder,
-                    torch_dtype=torch_dtype,
-                    trust_remote_code=True,
-                    use_safetensors=True
-                ).eval()
-                print("模型已从 Hugging Face Hub 加载")
+    "r2v": """You are an expert at writing subject-driven video generation prompts. I'm providing you with reference image(s) of the subject(s) that will appear in the video.
 
-            print("模型加载完成")
+Your task is to analyze the reference image(s) and generate a detailed prompt for subject-driven video generation:
 
-            # 返回模型和处理器的组合
-            model_info = {
-                "model": model,
-                "processor": processor,
-                "model_type": model_type,
-                "model_path": model_path
-            }
+**Requirements:**
+- Describe the subject(s) from the reference image(s) with detailed appearance (hair, clothing, accessories, expression, etc.)
+- Describe the scene/environment in detail (background, lighting, objects, atmosphere)
+- Describe the motion and actions in a step-by-step temporal sequence (at the start..., then..., after that...)
+- The motion should remain natural and realistic
+- The appearance description of each subject must be based on what you actually see in the reference image(s). Do NOT hallucinate details not visible in the images
+- The output must be entirely in English
+- Output ONLY the final enhanced English prompt. No extra text.""",
 
-            return (model_info,)
+    "i2v": """You are a helpful assistant specialized in image-to-video generation.
+Task: Image-to-Video Generation
 
-        except Exception as e:
-            raise Exception(f"模型加载失败: {str(e)}")
+I'm providing reference image(s) used as input frames. Your task is to analyze the image(s) and generate a detailed English prompt for video generation.
 
+**Requirements:**
+- If 1 image: Generate a video description prompt describing actions, camera movements, and scene, following T2V cinematic style
+- If 2 images: Return "Generate a video based on the first and last frames." + video description
+- If 3 images: Return "Generate a video based on the first, middle, and last frames." + video description
+- Output ONLY the final English prompt. No extra explanations.""",
 
-class QwenCaptionGeneratorNode:
-    """反推提示词节点 - 支持多图片和视频输入"""
+    "v2v": """You are an expert Video-to-Video (V2V) Prompt Engineer. Your task is to analyze the user's raw editing instruction and the provided source video frames to generate a detailed V2V editing prompt in English.
 
-    # 提示词模板文件路径
-    TEMPLATE_FILE = os.path.join(os.path.dirname(__file__), "提示词模板.txt")
+# CORE GENERATION RULE
+Your generated prompt MUST strictly follow this two-part structure:
+1. Modifications: Specifically describe what needs to be changed. Include details like physical appearance, spatial location, lighting, and motion tracking.
+2. Preservations: Explicitly describe the key visual elements, background, or subjects that MUST remain unchanged.
+3. Concretization: If the user's instruction contains vague references to characters, objects, outfits, or styles, you MUST replace them with specific, well-known, named instances.
 
-    def __init__(self):
-        self.template_content = None
+Note that you don't need to explicitly write "Modifications: xx. Preservations: xx.". Just describe it naturally.
 
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model": ("QWEN_MODEL",),
-            },
-            "optional": {
-                "image1": ("IMAGE",),
-                "image2": ("IMAGE",),
-                "image3": ("IMAGE",),
-                "image4": ("IMAGE",),
-                "image5": ("IMAGE",),
-                "video": ("VIDEO",),
-                "task_type": (["auto", "t2i", "t2v", "i2i", "i2v", "r2i", "r2v"], {
-                    "default": "auto"
-                }),
-                "language": (["both", "chinese", "english"], {
-                    "default": "both"
-                }),
-                "use_template": ("BOOLEAN", {
-                    "default": True,
-                    "label_on": "使用模板",
-                    "label_off": "不使用模板"
-                }),
-                "max_tokens": ("INT", {
-                    "default": 1024,
-                    "min": 256,
-                    "max": 4096,
-                    "step": 128
-                }),
-            }
-        }
+# OUTPUT REQUIREMENT
+Output ONLY the final enhanced English prompt. Do not include any explanations, greetings, or the category name.
+Do not imagine things that do not appear in the video.""",
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("caption_combined", "caption_chinese", "caption_english")
-    FUNCTION = "generate_caption"
-    CATEGORY = "QwenCLIP"
+    "vi2v": """You are an expert at video editing with reference images. Your task is to analyze the source video frames and reference image(s), then generate a detailed English prompt for reference-guided video editing.
 
-    def load_template(self):
-        """加载提示词模板文件"""
-        if self.template_content is None:
-            try:
-                if os.path.exists(self.TEMPLATE_FILE):
-                    with open(self.TEMPLATE_FILE, 'r', encoding='utf-8') as f:
-                        self.template_content = f.read()
-                    print(f"已加载提示词模板: {self.TEMPLATE_FILE}")
-                else:
-                    print(f"提示词模板文件不存在: {self.TEMPLATE_FILE}")
-                    self.template_content = ""
-            except Exception as e:
-                print(f"加载模板文件失败: {e}")
-                self.template_content = ""
-        return self.template_content
+**Task types may include:**
+- Propagation: edit the video following the first frame
+- Reference insertion: integrate the object from the reference image into the video
+- Reference replacement: replace an element in the video with the element from the reference image
 
-    def save_temp_image(self, image_tensor, index=0):
-        """保存图像张量到临时文件"""
-        # 转换tensor到numpy
-        image_np = image_tensor[0].cpu().numpy()
+**Requirements:**
+- Analyze the provided images to determine the appropriate task type
+- Generate a precise English editing prompt
+- If it's a propagation task, output: "edit the video following the first frame."
+- If it's an insertion/replacement task, describe what to integrate/replace based on what you see
+- Output ONLY the final English prompt. No extra explanations.""",
 
-        # 转换到0-255范围
-        image_np = (image_np * 255).astype(np.uint8)
+    "rv2v": """You are an expert at writing prompts for reference-image-guided video editing. I'm providing you with:
+1. The first images are uniformly sampled frames from the source video that will be edited (in temporal order: frame0, frame1, frame2).
+2. The next images are reference image(s) that should guide the editing.
+3. An original editing instruction may be provided.
 
-        # 创建PIL图像
-        pil_image = Image.fromarray(image_np)
+The reference image(s) may serve different roles depending on the editing task — for example, providing the target object/person for a replacement or addition, indicating a target visual style, demonstrating a target motion or pose, or guiding other attribute-level edits.
 
-        # 保存到临时文件
-        temp_dir = folder_paths.get_temp_directory()
-        temp_path = os.path.join(temp_dir, f"temp_image_{index}.png")
-        pil_image.save(temp_path)
+Your task: Rewrite and enhance the original editing instruction into a detailed, precise English prompt for a reference-image-guided video editing model. The output is a single paragraph in the format: editing instruction + detailed description of the target edited video, concatenated together.
 
-        return temp_path
+Follow these rules strictly:
 
-    def extract_frames_from_video(self, video_path, num_frames=5):
-        """从视频中提取关键帧"""
-        try:
-            import cv2
+1. Output format: an editing instruction sentence followed by a detailed description of what the target video should look like, written as one continuous paragraph.
+2. Match the edit type: use the verb that matches the actual intent — "Replace...", "Remove...", "Add...", "Restyle... in the style of...", "Transfer the motion/pose of... to...", "Change the ... of ...", etc.
+3. Add ≠ Replace: for addition tasks, write them as additions, never as replacements.
+4. Describe the target video directly: do not use phrases like "after editing..." or "in the edited video...".
+5. Faithful reference appearance: the appearance, clothing, color, material in the prompt must match what is actually visible in the reference image. Do not hallucinate details.
+6. Screen-perspective left/right: all left/right directions must be from the camera/screen perspective.
+7. Preserve unchanged elements explicitly: state which aspects remain unchanged.
+8. No parentheses: do NOT use parentheses "()" anywhere in the output.
+9. English only: the output must be entirely in English.
 
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                raise Exception("无法打开视频文件")
+Return ONLY a JSON object with one key: "rewritten_text". The value should be the full rewritten editing prompt as one string. No extra text.""",
 
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+    "ads2v": """You are an expert at writing prompts for video advertising insertion. I'm providing you with uniformly sampled frames from the source video for context.
 
-            frames = []
-            for idx in frame_indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                ret, frame = cap.read()
-                if ret:
-                    # 转换BGR到RGB
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_image = Image.fromarray(frame_rgb)
+Your task is to generate a concise English advertising insertion instruction based on what you see in the video frames.
 
-                    temp_dir = folder_paths.get_temp_directory()
-                    temp_path = os.path.join(temp_dir, f"temp_video_frame_{idx}.png")
-                    pil_image.save(temp_path)
-                    frames.append(temp_path)
-
-            cap.release()
-            return frames
-
-        except ImportError:
-            raise Exception("需要安装 opencv-python: pip install opencv-python")
-
-    def build_prompt(self, task_type, num_images, has_video, use_template, template_content):
-        """根据任务类型构建提示词"""
-
-        # 基础提示词
-        base_prompt = "请分析提供的"
-
-        if num_images > 0:
-            base_prompt += f"{num_images}张图片"
-        if has_video:
-            if num_images > 0:
-                base_prompt += "和"
-            base_prompt += "视频"
-
-        base_prompt += "内容，生成用于AI"
-
-        # 根据任务类型调整
-        task_descriptions = {
-            "t2i": "文生图",
-            "t2v": "文生视频",
-            "i2i": "图像编辑",
-            "i2v": "图生视频",
-            "r2i": "主体参考生图",
-            "r2v": "主体参考生视频",
-            "auto": "生成"
-        }
-
-        task_desc = task_descriptions.get(task_type, "生成")
-        base_prompt += f"{task_desc}的详细提示词。"
-
-        # 添加模板参考
-        if use_template and template_content:
-            # 从模板中提取相关部分
-            template_sections = self.extract_template_sections(template_content, task_type)
-            if template_sections:
-                base_prompt += f"\n\n请参考以下模板规则：\n{template_sections}"
-
-        # 输出格式要求
-        base_prompt += """
-
-请按照以下JSON格式返回：
-{
-    "中文提示词": "详细的中文描述",
-    "英文提示词": "Detailed English description"
+**Requirements:**
+- Analyze the video frames to understand the scene
+- Generate a simple, one-sentence English instruction for ad placement
+- Example format: "Add Starbucks Latte wallpaper on the second floor across the street"
+- Output ONLY the final English prompt. No extra explanations.""",
 }
 
-要求：
-1. 描述要详细，包含主体、细节、风格、构图、光线等元素
-2. 英文提示词要适合AI模型使用
-3. 如果有多张图片，请综合分析后生成统一的提示词
-4. 如果是视频内容，请描述视频中的主要场景和动作"""
+# auto 类型不使用系统提示词，直接分析图片
+AUTO_SYSTEM_PROMPT = """You are a helpful assistant. Analyze the provided image(s) and generate a detailed English prompt suitable for AI image/video generation.
 
-        return base_prompt
-
-    def extract_template_sections(self, template_content, task_type):
-        """从模板中提取与任务类型相关的部分"""
-        sections = []
-
-        # 任务类型映射
-        task_mapping = {
-            "t2i": "T2I",
-            "t2v": "T2V",
-            "i2i": "I2I",
-            "i2v": "I2V",
-            "r2i": "R2I",
-            "r2v": "R2V",
-            "auto": None
-        }
-
-        template_task = task_mapping.get(task_type)
-
-        # 提取通用规则
-        if "电影美学设定" in template_content:
-            # 提取电影美学相关规则
-            start = template_content.find("电影美学设定")
-            if start != -1:
-                # 找到规则部分
-                rule_start = template_content.find("1.", start)
-                if rule_start != -1:
-                    # 提取前10个规则
-                    rule_end = template_content.find("生成的 prompt 示例", rule_start)
-                    if rule_end == -1:
-                        rule_end = min(rule_start + 2000, len(template_content))
-                    rules = template_content[rule_start:rule_end].strip()
-                    sections.append(f"【电影美学规则】\n{rules}")
-
-        # 提取任务特定模板
-        if template_task and template_task in template_content:
-            task_start = template_content.find(template_task)
-            if task_start != -1:
-                # 提取该任务的描述
-                task_end = template_content.find("\n\n", task_start + 100)
-                if task_end == -1:
-                    task_end = min(task_start + 1000, len(template_content))
-                task_section = template_content[task_start:task_end].strip()
-                sections.append(f"【{template_task}任务要求】\n{task_section}")
-
-        return "\n\n".join(sections) if sections else ""
-
-    def generate_caption(self, model, image1=None, image2=None, image3=None, image4=None,
-                         image5=None, video=None, task_type="auto", language="both",
-                         use_template=True, max_tokens=1024):
-        """生成图像/视频描述"""
-
-        temp_files = []  # 用于跟踪临时文件
-
-        try:
-            # 获取模型和处理器
-            llm_model = model["model"]
-            processor = model["processor"]
-
-            # 收集所有输入的图片
-            images = []
-            for i, img in enumerate([image1, image2, image3, image4, image5], 1):
-                if img is not None:
-                    temp_path = self.save_temp_image(img, i)
-                    images.append(temp_path)
-                    temp_files.append(temp_path)
-
-            # 处理视频输入
-            video_frames = []
-            if video is not None:
-                # 假设video是视频文件路径
-                if isinstance(video, str) and os.path.exists(video):
-                    video_frames = self.extract_frames_from_video(video, num_frames=5)
-                    temp_files.extend(video_frames)
-                    images.extend(video_frames)
-
-            if not images:
-                raise Exception("请至少提供一张图片或视频")
-
-            # 加载模板
-            template_content = ""
-            if use_template:
-                template_content = self.load_template()
-
-            # 构建提示词
-            prompt = self.build_prompt(task_type, len(images) - len(video_frames),
-                                       len(video_frames) > 0, use_template, template_content)
-
-            # 构建 Qwen2.5-VL 消息格式
-            content = []
-            for img_path in images:
-                content.append({"type": "image", "image": img_path})
-            content.append({"type": "text", "text": prompt})
-
-            messages = [{"role": "user", "content": content}]
-
-            # 使用 processor 的 apply_chat_template 处理文本
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-            # 处理视觉信息
-            image_inputs, video_inputs = process_vision_info(messages)
-
-            # 构建输入
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt"
-            )
-
-            # 确定设备
-            device = next(llm_model.parameters()).device
-            inputs = inputs.to(device)
-
-            with torch.no_grad():
-                generated_ids = llm_model.generate(
-                    **inputs,
-                    max_new_tokens=max_tokens,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_k=50,
-                    top_p=0.95,
-                )
-
-            # 裁剪掉输入部分，只保留生成的部分
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            response = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-
-            # 解析JSON响应
-            chinese_caption = ""
-            english_caption = ""
-
-            try:
-                # 尝试提取JSON
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-
-                if json_start != -1 and json_end > json_start:
-                    json_str = response[json_start:json_end]
-                    json_data = json.loads(json_str)
-                    chinese_caption = json_data.get('中文提示词', '')
-                    english_caption = json_data.get('英文提示词', '')
-                else:
-                    # 如果没有JSON格式，使用原始响应
-                    chinese_caption = response
-                    english_caption = response
-
-            except json.JSONDecodeError:
-                print(f"警告：无法解析JSON格式的回答，使用原始文本")
-                chinese_caption = response
-                english_caption = response
-
-            # 根据语言设置返回
-            if language == "chinese":
-                combined = chinese_caption
-            elif language == "english":
-                combined = english_caption
-            else:
-                combined = f"【中文】\n{chinese_caption}\n\n【English】\n{english_caption}"
-
-            return (combined, chinese_caption, english_caption)
-
-        except Exception as e:
-            raise Exception(f"生成提示词失败: {str(e)}")
-
-        finally:
-            # 清理临时文件
-            for temp_path in temp_files:
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except OSError:
-                    pass
-
-
-import base64
-import io
-import requests
+Requirements:
+1. Describe the main subject, details, style, composition, lighting, and atmosphere
+2. The prompt should be detailed and suitable for AI generation models
+3. If multiple images, analyze them comprehensively and generate a unified prompt
+4. Output ONLY the English prompt. No extra explanations."""
 
 
 class ModelScopeAPILoaderNode:
@@ -507,12 +222,6 @@ class ModelScopeAPILoaderNode:
 class ModelScopeAPICaptionNode:
     """通过魔搭社区 API 反推提示词（无需本地 GPU）"""
 
-    # 提示词模板文件路径
-    TEMPLATE_FILE = os.path.join(os.path.dirname(__file__), "提示词模板.txt")
-
-    def __init__(self):
-        self.template_content = None
-
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -525,46 +234,19 @@ class ModelScopeAPICaptionNode:
                 "image3": ("IMAGE",),
                 "image4": ("IMAGE",),
                 "image5": ("IMAGE",),
-                "task_type": (["auto", "t2i", "t2v", "i2i", "i2v", "r2i", "r2v"], {
+                "task_type": (["auto", "t2i", "t2v", "i2i", "i2v", "r2i", "r2v", "v2v", "vi2v", "rv2v", "ads2v"], {
                     "default": "auto"
                 }),
                 "language": (["both", "chinese", "english"], {
                     "default": "both"
                 }),
-                "use_template": ("BOOLEAN", {
-                    "default": True,
-                    "label_on": "使用模板",
-                    "label_off": "不使用模板"
-                }),
-                "max_tokens": ("INT", {
-                    "default": 1024,
-                    "min": 256,
-                    "max": 4096,
-                    "step": 128
-                }),
             }
         }
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("caption_combined", "caption_chinese", "caption_english")
+    RETURN_NAMES = ("template_output", "caption_chinese", "caption_english")
     FUNCTION = "generate_caption"
     CATEGORY = "QwenCLIP"
-
-    def load_template(self):
-        """加载提示词模板文件"""
-        if self.template_content is None:
-            try:
-                if os.path.exists(self.TEMPLATE_FILE):
-                    with open(self.TEMPLATE_FILE, 'r', encoding='utf-8') as f:
-                        self.template_content = f.read()
-                    print(f"已加载提示词模板: {self.TEMPLATE_FILE}")
-                else:
-                    print(f"提示词模板文件不存在: {self.TEMPLATE_FILE}")
-                    self.template_content = ""
-            except Exception as e:
-                print(f"加载模板文件失败: {e}")
-                self.template_content = ""
-        return self.template_content
 
     def image_to_base64_url(self, image_tensor):
         """将 ComfyUI 图像张量转换为 base64 data URL（压缩以减小请求体积）"""
@@ -585,140 +267,87 @@ class ModelScopeAPICaptionNode:
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
 
-    def build_prompt(self, task_type, num_images, use_template, template_content):
-        """根据任务类型构建提示词"""
-        base_prompt = "请分析提供的"
-        base_prompt += f"{num_images}张图片"
-        base_prompt += "内容，生成用于AI"
+    def build_messages(self, images, task_type, language):
+        """根据任务类型和图片构建 API 消息"""
+        # 选择系统提示词
+        if task_type == "auto":
+            system_prompt = AUTO_SYSTEM_PROMPT
+        else:
+            system_prompt = SYSTEM_PROMPTS.get(task_type, AUTO_SYSTEM_PROMPT)
 
-        task_descriptions = {
-            "t2i": "文生图",
-            "t2v": "文生视频",
-            "i2i": "图像编辑",
-            "i2v": "图生视频",
-            "r2i": "主体参考生图",
-            "r2v": "主体参考生视频",
-            "auto": "生成"
+        # 构建用户消息内容
+        content = []
+        for img in images:
+            img_url = self.image_to_base64_url(img)
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": img_url}
+            })
+
+        # 根据语言要求调整输出指令
+        if language == "chinese":
+            lang_instruction = "\n\n请用中文输出最终的提示词。"
+        elif language == "english":
+            lang_instruction = "\n\nOutput in English only."
+        else:
+            lang_instruction = "\n\n请按照以下JSON格式返回：\n{\"中文提示词\": \"详细的中文描述\", \"英文提示词\": \"Detailed English description\"}"
+
+        # 对于非 auto 类型，添加图片分析指令
+        if task_type != "auto":
+            user_text = f"请分析提供的{len(images)}张图片，根据任务类型「{task_type}」的要求，生成对应的提示词。{lang_instruction}"
+        else:
+            user_text = f"请分析提供的{len(images)}张图片内容，生成详细的AI生成提示词。{lang_instruction}"
+
+        content.append({"type": "text", "text": user_text})
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content}
+        ]
+
+        return messages
+
+    def call_api(self, api_config, messages):
+        """调用魔搭 API"""
+        url = f"{api_config['base_url']}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_config['api_key']}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": api_config["model"],
+            "messages": messages,
+            "max_tokens": 2048,
+            "temperature": 0.7,
+            "top_p": 0.95,
         }
 
-        task_desc = task_descriptions.get(task_type, "生成")
-        base_prompt += f"{task_desc}的详细提示词。"
+        print(f"正在调用魔搭 API: {api_config['model']}...")
 
-        if use_template and template_content:
-            template_sections = self.extract_template_sections(template_content, task_type)
-            if template_sections:
-                base_prompt += f"\n\n请参考以下模板规则：\n{template_sections}"
+        # 绕过代理直连（平台代理会丢弃大请求）
+        no_proxy = {"http": None, "https": None}
+        resp = req.post(url, headers=headers, json=payload, timeout=120, verify=False, proxies=no_proxy)
+        resp.raise_for_status()
 
-        base_prompt += """
+        resp_data = resp.json()
+        result = resp_data["choices"][0]["message"]["content"]
+        print(f"API 返回完成，长度: {len(result)}")
+        return result
 
-请按照以下JSON格式返回：
-{
-    "中文提示词": "详细的中文描述",
-    "英文提示词": "Detailed English description"
-}
+    def parse_response(self, result, language):
+        """解析 API 响应"""
+        template_output = result.strip()
+        chinese_caption = ""
+        english_caption = ""
 
-要求：
-1. 描述要详细，包含主体、细节、风格、构图、光线等元素
-2. 英文提示词要适合AI模型使用
-3. 如果有多张图片，请综合分析后生成统一的提示词"""
-
-        return base_prompt
-
-    def extract_template_sections(self, template_content, task_type):
-        """从模板中提取与任务类型相关的部分"""
-        sections = []
-
-        task_mapping = {
-            "t2i": "T2I", "t2v": "T2V", "i2i": "I2I",
-            "i2v": "I2V", "r2i": "R2I", "r2v": "R2V", "auto": None
-        }
-
-        template_task = task_mapping.get(task_type)
-
-        if "电影美学设定" in template_content:
-            start = template_content.find("电影美学设定")
-            if start != -1:
-                rule_start = template_content.find("1.", start)
-                if rule_start != -1:
-                    rule_end = template_content.find("生成的 prompt 示例", rule_start)
-                    if rule_end == -1:
-                        rule_end = min(rule_start + 2000, len(template_content))
-                    rules = template_content[rule_start:rule_end].strip()
-                    sections.append(f"【电影美学规则】\n{rules}")
-
-        if template_task and template_task in template_content:
-            task_start = template_content.find(template_task)
-            if task_start != -1:
-                task_end = template_content.find("\n\n", task_start + 100)
-                if task_end == -1:
-                    task_end = min(task_start + 1000, len(template_content))
-                task_section = template_content[task_start:task_end].strip()
-                sections.append(f"【{template_task}任务要求】\n{task_section}")
-
-        return "\n\n".join(sections) if sections else ""
-
-    def generate_caption(self, api_config, image1=None, image2=None, image3=None,
-                         image4=None, image5=None, task_type="auto", language="both",
-                         use_template=True, max_tokens=1024):
-        """通过魔搭 API 生成图像描述"""
-        try:
-            # 收集所有输入的图片
-            images = [img for img in [image1, image2, image3, image4, image5] if img is not None]
-
-            if not images:
-                raise Exception("请至少提供一张图片")
-
-            # 加载模板
-            template_content = ""
-            if use_template:
-                template_content = self.load_template()
-
-            # 构建提示词
-            prompt = self.build_prompt(task_type, len(images), use_template, template_content)
-
-            # 构建消息内容
-            content = []
-            for img in images:
-                img_url = self.image_to_base64_url(img)
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": img_url}
-                })
-            content.append({"type": "text", "text": prompt})
-
-            messages = [{"role": "user", "content": content}]
-
-            # 使用 requests 直接调用 API（兼容性更好）
-            import requests as req
-
-            url = f"{api_config['base_url']}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_config['api_key']}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": api_config["model"],
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": 0.7,
-                "top_p": 0.95,
-            }
-
-            print(f"正在调用魔搭 API: {api_config['model']}...")
-
-            # 绕过代理直连（平台代理会丢弃大请求）
-            no_proxy = {"http": None, "https": None}
-            resp = req.post(url, headers=headers, json=payload, timeout=120, verify=False, proxies=no_proxy)
-            resp.raise_for_status()
-
-            resp_data = resp.json()
-            result = resp_data["choices"][0]["message"]["content"]
-            print(f"API 返回完成，长度: {len(result)}")
-
-            # 解析JSON响应
-            chinese_caption = ""
+        if language == "chinese":
+            chinese_caption = template_output
             english_caption = ""
-
+        elif language == "english":
+            english_caption = template_output
+            chinese_caption = ""
+        else:
+            # both 模式：尝试解析 JSON
             try:
                 json_start = result.find('{')
                 json_end = result.rfind('}') + 1
@@ -731,21 +360,32 @@ class ModelScopeAPICaptionNode:
                 else:
                     chinese_caption = result
                     english_caption = result
-
             except json.JSONDecodeError:
-                print("警告：无法解析JSON格式的回答，使用原始文本")
                 chinese_caption = result
                 english_caption = result
 
-            # 根据语言设置返回
-            if language == "chinese":
-                combined = chinese_caption
-            elif language == "english":
-                combined = english_caption
-            else:
-                combined = f"【中文】\n{chinese_caption}\n\n【English】\n{english_caption}"
+        return template_output, chinese_caption, english_caption
 
-            return (combined, chinese_caption, english_caption)
+    def generate_caption(self, api_config, image1=None, image2=None, image3=None,
+                         image4=None, image5=None, task_type="auto", language="both"):
+        """通过魔搭 API 生成图像描述"""
+        try:
+            # 收集所有输入的图片
+            images = [img for img in [image1, image2, image3, image4, image5] if img is not None]
+
+            if not images:
+                raise Exception("请至少提供一张图片")
+
+            # 构建消息
+            messages = self.build_messages(images, task_type, language)
+
+            # 调用 API
+            result = self.call_api(api_config, messages)
+
+            # 解析响应
+            template_output, chinese_caption, english_caption = self.parse_response(result, language)
+
+            return (template_output, chinese_caption, english_caption)
 
         except Exception as e:
             raise Exception(f"API 调用失败: {str(e)}")
@@ -753,15 +393,11 @@ class ModelScopeAPICaptionNode:
 
 # 节点映射
 NODE_CLASS_MAPPINGS = {
-    "QwenModelLoaderNode": QwenModelLoaderNode,
-    "QwenCaptionGeneratorNode": QwenCaptionGeneratorNode,
     "ModelScopeAPILoaderNode": ModelScopeAPILoaderNode,
     "ModelScopeAPICaptionNode": ModelScopeAPICaptionNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "QwenModelLoaderNode": "加载 Qwen 模型",
-    "QwenCaptionGeneratorNode": "反推提示词 (Qwen)",
     "ModelScopeAPILoaderNode": "魔搭 API 配置",
     "ModelScopeAPICaptionNode": "反推提示词 (魔搭 API)",
 }
