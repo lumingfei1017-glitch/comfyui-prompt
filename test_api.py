@@ -21,8 +21,11 @@ MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 TEST_IMAGE_URL = "https://modelscope.oss-cn-beijing.aliyuncs.com/demo/images/audrey_hepburn.jpg"
 
 
+NO_PROXY = {"http": None, "https": None}
+
+
 def call_api(messages, max_tokens=1024):
-    """使用 requests 直接调用 API"""
+    """使用 requests 直接调用 API（绕过代理直连）"""
     url = f"{BASE_URL}/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -35,7 +38,7 @@ def call_api(messages, max_tokens=1024):
         "temperature": 0.7,
         "top_p": 0.95,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=120, verify=False)
+    resp = requests.post(url, headers=headers, json=payload, timeout=120, verify=False, proxies=NO_PROXY)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
 
@@ -51,7 +54,8 @@ def test_api_connection():
             f"{BASE_URL}/models",
             headers={"Authorization": f"Bearer {API_KEY}"},
             timeout=10,
-            verify=False
+            verify=False,
+            proxies=NO_PROXY
         )
         print(f"✓ API 连接成功，状态码: {resp.status_code}")
         return True

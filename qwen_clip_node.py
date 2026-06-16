@@ -706,7 +706,9 @@ class ModelScopeAPICaptionNode:
 
             print(f"正在调用魔搭 API: {api_config['model']}...")
 
-            resp = req.post(url, headers=headers, json=payload, timeout=120, verify=False)
+            # 绕过代理直连（平台代理会丢弃大请求）
+            no_proxy = {"http": None, "https": None}
+            resp = req.post(url, headers=headers, json=payload, timeout=120, verify=False, proxies=no_proxy)
             resp.raise_for_status()
 
             resp_data = resp.json()
