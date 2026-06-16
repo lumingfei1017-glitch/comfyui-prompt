@@ -567,15 +567,23 @@ class ModelScopeAPICaptionNode:
         return self.template_content
 
     def image_to_base64_url(self, image_tensor):
-        """将 ComfyUI 图像张量转换为 base64 data URL"""
+        """将 ComfyUI 图像张量转换为 base64 data URL（压缩以减小请求体积）"""
         image_np = image_tensor[0].cpu().numpy()
         image_np = (image_np * 255).astype(np.uint8)
         pil_image = Image.fromarray(image_np)
 
+        # 缩放到最大 1024 边长，减小 base64 体积
+        max_size = 1024
+        w, h = pil_image.size
+        if max(w, h) > max_size:
+            ratio = max_size / max(w, h)
+            pil_image = pil_image.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+        # 用 JPEG 压缩，比 PNG 小很多
         buffer = io.BytesIO()
-        pil_image.save(buffer, format="PNG")
+        pil_image.save(buffer, format="JPEG", quality=85)
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        return f"data:image/png;base64,{b64_str}"
+        return f"data:image/jpeg;base64,{b64_str}"
 
     def build_prompt(self, task_type, num_images, use_template, template_content):
         """根据任务类型构建提示词"""
@@ -698,7 +706,7 @@ class ModelScopeAPICaptionNode:
 
             print(f"正在调用魔搭 API: {api_config['model']}...")
 
-            resp = req.post(url, headers=headers, json=payload, timeout=120)
+            resp = req.post(url, headers=headers, json=payload, timeout=120, verify=False)
             resp.raise_for_status()
 
             resp_data = resp.json()

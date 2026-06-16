@@ -7,7 +7,10 @@ import json
 import base64
 import io
 import requests
+import urllib3
 from PIL import Image
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ========== 配置 ==========
 API_KEY = "ms-e96a3b60-9bfc-4645-80cc-33238bb6208b"
@@ -32,7 +35,7 @@ def call_api(messages, max_tokens=1024):
         "temperature": 0.7,
         "top_p": 0.95,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp = requests.post(url, headers=headers, json=payload, timeout=120, verify=False)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
 
@@ -47,7 +50,8 @@ def test_api_connection():
         resp = requests.get(
             f"{BASE_URL}/models",
             headers={"Authorization": f"Bearer {API_KEY}"},
-            timeout=10
+            timeout=10,
+            verify=False
         )
         print(f"✓ API 连接成功，状态码: {resp.status_code}")
         return True
@@ -103,9 +107,9 @@ def test_image_base64():
     try:
         img = Image.new("RGB", (100, 100), color=(255, 0, 0))
         buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
+        img.save(buffer, format="JPEG", quality=85)
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        img_url = f"data:image/png;base64,{b64_str}"
+        img_url = f"data:image/jpeg;base64,{b64_str}"
 
         result = call_api([{
             "role": "user",
