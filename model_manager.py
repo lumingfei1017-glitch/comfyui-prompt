@@ -8,13 +8,24 @@ class ModelManager:
     def __init__(self):
         self.models_dir = os.path.join(folder_paths.models_dir, "clip")
         self.ensure_models_dir()
-        
+
         # 模型配置
         self.model_configs = {
             "qwen2.5-vl-7b-instruct": {
                 "name": "Qwen2.5-VL-7B-Instruct",
-                "url": "https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct",
-                "files": ["config.json", "tokenizer_config.json", "model.safetensors.index.json"] + [f"model-0000{i}-of-00005.safetensors" for i in range(1, 6)]
+                "repo_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+                # 配置文件（小文件，从 /raw/main/ 下载）
+                "config_files": [
+                    "config.json",
+                    "tokenizer_config.json",
+                    "tokenizer.json",
+                    "preprocessor_config.json",
+                    "processor_config.json",
+                    "generation_config.json",
+                    "model.safetensors.index.json",
+                ],
+                # 模型权重文件（大文件，从 /resolve/main/ 下载）
+                "weight_files": [f"model-0000{i}-of-00005.safetensors" for i in range(1, 6)]
             }
         }
     
@@ -36,94 +47,48 @@ class ModelManager:
         """下载模型"""
         if model_type not in self.model_configs:
             raise ValueError(f"不支持的模型类型: {model_type}")
-        
+
         model_config = self.model_configs[model_type]
         model_name = model_config["name"]
+        repo_id = model_config["repo_id"]
         model_path = os.path.join(self.models_dir, model_name)
-        
+
         print(f"正在准备下载模型: {model_name}")
-        
+
         # 创建模型目录
         if not os.path.exists(model_path):
             os.makedirs(model_path)
-        
+
+        # 合并所有需要下载的文件
+        all_files = model_config["config_files"] + model_config["weight_files"]
+
         # 模型下载逻辑 - 实现断点续传
         print(f"请稍候，模型 {model_name} 正在从Hugging Face下载...")
-        
+
         # 下载主要模型文件
         try:
-            # 下载配置文件
-            self._download_file_with_resume(
-                f"https://huggingface.co/qwen/{model_name}/raw/main/config.json",
-                os.path.join(model_path, "config.json")
-            )
-            print(f"配置文件已下载")
-            
-            # 下载tokenizer配置
-            self._download_file_with_resume(
-                f"https://huggingface.co/qwen/{model_name}/raw/main/tokenizer_config.json",
-                os.path.join(model_path, "tokenizer_config.json")
-            )
-            print(f"tokenizer配置已下载")
-            
-            # 下载模型索引文件
-            index_file = model_config['files'][2]  # 索引文件是files列表中的第三个元素
-            self._download_file_with_resume(
-                f"https://huggingface.co/Qwen/{model_name}/resolve/main/{index_file}",
-                os.path.join(model_path, index_file)
-            )
-            print(f"模型索引文件已下载")
-            
-            # 下载模型权重文件（分块）
-            # 权重文件是files列表中从第四个元素开始的所有元素
-            weight_files = model_config['files'][3:]
-            for i, file_name in enumerate(weight_files, 1):
+            for file_name in all_files:
                 self._download_file_with_resume(
-                    f"https://huggingface.co/Qwen/{model_name}/resolve/main/{file_name}",
+                    f"https://huggingface.co/{repo_id}/resolve/main/{file_name}",
                     os.path.join(model_path, file_name)
                 )
-                print(f"模型权重文件{i}已下载")
-            
+                print(f"已下载: {file_name}")
+
         except Exception as e:
             # 尝试使用国内镜像
             try:
                 print(f"尝试使用国内镜像下载...")
-                # 下载配置文件
-                self._download_file_with_resume(
-                    f"https://hf-mirror.com/Qwen/{model_name}/raw/main/config.json",
-                    os.path.join(model_path, "config.json")
-                )
-                print(f"配置文件已下载")
-                
-                # 下载tokenizer配置
-                self._download_file_with_resume(
-                    f"https://hf-mirror.com/Qwen/{model_name}/raw/main/tokenizer_config.json",
-                    os.path.join(model_path, "tokenizer_config.json")
-                )
-                print(f"tokenizer配置已下载")
-                
-                # 下载模型索引文件
-                index_file = model_config['files'][2]  # 索引文件是files列表中的第三个元素
-                self._download_file_with_resume(
-                    f"https://hf-mirror.com/Qwen/{model_name}/resolve/main/{index_file}",
-                    os.path.join(model_path, index_file)
-                )
-                print(f"模型索引文件已下载")
-                
-                # 下载模型权重文件（分块）
-                # 权重文件是files列表中从第四个元素开始的所有元素
-                weight_files = model_config['files'][3:]
-                for i, file_name in enumerate(weight_files, 1):
+                for file_name in all_files:
                     self._download_file_with_resume(
-                        f"https://hf-mirror.com/Qwen/{model_name}/resolve/main/{file_name}",
+                        f"https://hf-mirror.com/{repo_id}/resolve/main/{file_name}",
                         os.path.join(model_path, file_name)
                     )
-                    print(f"模型权重文件{i}已下载")
+                    print(f"已下载: {file_name}")
             except Exception as e2:
                 error_msg = f"模型下载失败: {str(e2)}"
                 error_msg += "\n请确保您的网络连接正常，并且可以访问Hugging Face网站或国内镜像。"
-                error_msg += "\n如果下载持续失败，您可以尝试手动下载模型文件并放置到 {model_path} 目录下。"
-                error_msg += f"\n模型下载地址: https://huggingface.co/Qwen/{model_name}"
+                error_msg += f"\n如果下载持续失败，您可以尝试手动下载模型文件并放置到 {model_path} 目录下。"
+                error_msg += f"\n模型下载地址: https://huggingface.co/{repo_id}"
                 raise Exception(error_msg)
 
         return model_path
