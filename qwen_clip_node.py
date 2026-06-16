@@ -458,7 +458,7 @@ class QwenCaptionGeneratorNode:
 
 import base64
 import io
-from openai import OpenAI
+import requests
 
 
 class ModelScopeAPILoaderNode:
@@ -680,23 +680,29 @@ class ModelScopeAPICaptionNode:
 
             messages = [{"role": "user", "content": content}]
 
-            # 创建客户端并调用 API
-            client = OpenAI(
-                base_url=api_config["base_url"],
-                api_key=api_config["api_key"]
-            )
+            # 使用 requests 直接调用 API（兼容性更好）
+            import requests as req
+
+            url = f"{api_config['base_url']}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_config['api_key']}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": api_config["model"],
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.7,
+                "top_p": 0.95,
+            }
 
             print(f"正在调用魔搭 API: {api_config['model']}...")
 
-            response = client.chat.completions.create(
-                model=api_config["model"],
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.7,
-                top_p=0.95,
-            )
+            resp = req.post(url, headers=headers, json=payload, timeout=120)
+            resp.raise_for_status()
 
-            result = response.choices[0].message.content
+            resp_data = resp.json()
+            result = resp_data["choices"][0]["message"]["content"]
             print(f"API 返回完成，长度: {len(result)}")
 
             # 解析JSON响应
