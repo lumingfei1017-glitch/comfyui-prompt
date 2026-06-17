@@ -176,57 +176,92 @@ Requirements:
 4. Output ONLY the English prompt. No extra explanations."""
 
 
-class ModelScopeAPILoaderNode:
-    """通过魔搭社区 API 加载模型（无需本地 GPU）"""
+class LLMLoaderNode:
+    """通用 LLM 模型配置节点（支持魔搭社区、OnethingAI 等平台）"""
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
+                "platform": (["ModelScope", "OnethingAI", "Custom"], {
+                    "default": "ModelScope",
+                    "tooltip": "选择 API 平台"
+                }),
                 "api_key": ("STRING", {
                     "default": "",
-                    "tooltip": "魔搭社区 API Token，前往 https://modelscope.cn 获取"
+                    "tooltip": "API 密钥：魔搭社区前往 https://modelscope.cn 获取，OnethingAI 前往 https://onethingai.com 获取"
                 }),
             },
             "optional": {
-                "model": (["Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"], {
-                    "default": "Qwen/Qwen3-VL-8B-Instruct"
+                "model": ("STRING", {
+                    "default": "",
+                    "tooltip": "模型名称（留空则使用平台默认模型）"
                 }),
                 "base_url": ("STRING", {
-                    "default": "https://api-inference.modelscope.cn/v1"
+                    "default": "",
+                    "tooltip": "API Base URL（留空则使用平台默认地址）"
                 }),
             }
         }
 
-    RETURN_TYPES = ("MODELSCOPE_API",)
+    RETURN_TYPES = ("LLM_API",)
     RETURN_NAMES = ("api_config",)
     FUNCTION = "load_api"
     CATEGORY = "QwenCLIP"
 
-    def load_api(self, api_key, model="Qwen/Qwen3-VL-8B-Instruct",
-                 base_url="https://api-inference.modelscope.cn/v1"):
+    # 平台默认配置
+    PLATFORM_DEFAULTS = {
+        "ModelScope": {
+            "base_url": "https://api-inference.modelscope.cn/v1",
+            "model": "Qwen/Qwen3-VL-8B-Instruct",
+            "models": ["Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"],
+            "need_job_type": False
+        },
+        "OnethingAI": {
+            "base_url": "https://api-model.onethingai.com/v2/generation",
+            "model": "doubao-seed-1-6-flash-250615",
+            "models": ["doubao-seed-1-6-flash-250615", "doubao-seed-1-6-250615", "deepseek-v3-250324", "deepseek-r1-250528"],
+            "need_job_type": True
+        }
+    }
+
+    def load_api(self, platform, api_key, model="", base_url=""):
         """返回 API 配置"""
         if not api_key or api_key.strip() == "":
-            raise Exception("请填写魔搭社区 API Token，前往 https://modelscope.cn 控制台获取")
+            raise Exception("请填写 API 密钥")
+
+        # 获取平台默认配置
+        platform_config = self.PLATFORM_DEFAULTS.get(platform, {})
+
+        # 使用用户输入或默认值
+        final_base_url = base_url.strip() if base_url.strip() else platform_config.get("base_url", "")
+        final_model = model.strip() if model.strip() else platform_config.get("model", "")
+
+        if not final_base_url:
+            raise Exception("请填写 API Base URL")
+        if not final_model:
+            raise Exception("请填写模型名称")
 
         api_config = {
-            "base_url": base_url,
+            "base_url": final_base_url,
             "api_key": api_key.strip(),
-            "model": model
+            "model": final_model,
+            "platform": platform,
+            "need_job_type": platform_config.get("need_job_type", False)
         }
 
-        print(f"魔搭 API 配置完成: model={model}, base_url={base_url}")
+        print(f"LLM 配置完成: platform={platform}, model={final_model}, base_url={final_base_url}")
         return (api_config,)
 
 
 class ModelScopeAPICaptionNode:
-    """通过魔搭社区 API 反推提示词（无需本地 GPU）"""
+    """通过 LLM API 反推提示词（支持魔搭社区、OnethingAI 等平台）"""
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "api_config": ("MODELSCOPE_API",),
+                "api_config": ("LLM_API",),
             },
             "optional": {
                 "image1": ("IMAGE",),
@@ -368,21 +403,37 @@ class ModelScopeAPICaptionNode:
         return messages
 
     def call_api(self, api_config, messages):
-        """调用魔搭 API"""
-        url = f"{api_config['base_url']}/chat/completions"
+        """调用 LLM API"""
+        url = api_config['base_url']
+
+        # 根据平台决定 URL
+        if api_config.get('platform') == 'OnethingAI':
+            # OnethingAI 直接使用 base_url，不需要拼接 /chat/completions
+            url = api_config['base_url']
+        else:
+            # 其他平台（如魔搭）需要拼接 /chat/completions
+            url = f"{api_config['base_url']}/chat/completions"
+
         headers = {
             "Authorization": f"Bearer {api_config['api_key']}",
             "Content-Type": "application/json"
         }
+
         payload = {
             "model": api_config["model"],
             "messages": messages,
             "max_tokens": 2048,
             "temperature": 0.7,
             "top_p": 0.95,
+            "stream": False
         }
 
-        print(f"正在调用魔搭 API: {api_config['model']}...")
+        # OnethingAI 需要额外的 job_type 字段
+        if api_config.get('need_job_type'):
+            payload["job_type"] = "chat/completions"
+
+        platform_name = api_config.get('platform', 'LLM')
+        print(f"正在调用 {platform_name} API: {api_config['model']}...")
 
         # 绕过代理直连（平台代理会丢弃大请求）
         no_proxy = {"http": None, "https": None}
@@ -467,11 +518,11 @@ class ModelScopeAPICaptionNode:
 
 # 节点映射
 NODE_CLASS_MAPPINGS = {
-    "ModelScopeAPILoaderNode": ModelScopeAPILoaderNode,
+    "LLMLoaderNode": LLMLoaderNode,
     "ModelScopeAPICaptionNode": ModelScopeAPICaptionNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ModelScopeAPILoaderNode": "魔搭 API 配置",
-    "ModelScopeAPICaptionNode": "反推提示词 (魔搭 API)",
+    "LLMLoaderNode": "LLM 模型配置",
+    "ModelScopeAPICaptionNode": "反推提示词 (LLM)",
 }
