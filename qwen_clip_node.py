@@ -234,8 +234,10 @@ class ModelScopeAPICaptionNode:
                 "image3": ("IMAGE",),
                 "image4": ("IMAGE",),
                 "image5": ("IMAGE",),
-                "video_batch": ("IMAGE", {
-                    "tooltip": "视频拆帧后的图像批次（如使用VHS的Video Loader节点）。将自动取首帧和尾帧进行分析"
+                "text": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "补充文本描述（如原始提示词、编辑指令等），将与图片一起发送给模型分析"
                 }),
                 "task_type": (["auto", "t2i", "t2v", "i2i", "i2v", "r2i", "r2v", "v2v", "vi2v", "rv2v", "ads2v"], {
                     "default": "auto"
@@ -270,23 +272,7 @@ class ModelScopeAPICaptionNode:
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
 
-    def extract_first_last_frames(self, video_batch):
-        """从图像批次中提取首帧和尾帧"""
-        if video_batch is None or len(video_batch) == 0:
-            return None, None
-
-        batch_size = len(video_batch)
-        print(f"[QwenCLIP] 视频批次大小: {batch_size} 帧")
-
-        # 取第一帧
-        first_frame = video_batch[0:1]  # 保持 batch 维度
-
-        # 取最后一帧
-        last_frame = video_batch[-1:]  # 保持 batch 维度
-
-        return first_frame, last_frame
-
-    def build_messages(self, images, task_type, language, video_frames=None):
+    def build_messages(self, images, task_type, language, user_text_input=""):
         """根据任务类型和图片构建 API 消息"""
         # 选择系统提示词
         if task_type == "auto":
@@ -297,17 +283,7 @@ class ModelScopeAPICaptionNode:
         # 构建用户消息内容
         content = []
 
-        # 添加视频帧（如果有）
-        if video_frames:
-            for frame_tensor in video_frames:
-                if frame_tensor is not None:
-                    img_url = self.image_to_base64_url(frame_tensor)
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": img_url}
-                    })
-
-        # 添加普通图片输入
+        # 添加图片输入
         for img in images:
             img_url = self.image_to_base64_url(img)
             content.append({
@@ -323,18 +299,18 @@ class ModelScopeAPICaptionNode:
         else:
             lang_instruction = "\n\n请按照以下JSON格式返回：\n{\"中文提示词\": \"详细的中文描述\", \"英文提示词\": \"Detailed English description\"}"
 
-        # 计算总图片数量（视频帧 + 普通图片）
-        total_images = len(content)  # content 中只有图片，还没有添加文本
-
-        # 对于非 auto 类型，添加图片分析指令
-        if task_type != "auto":
-            if video_frames and total_images > len(images):
-                user_text = f"请分析提供的{total_images}张图片（含视频首尾帧），根据任务类型「{task_type}」的要求，生成对应的提示词。{lang_instruction}"
+        # 构建用户文本
+        total_images = len(images)
+        if user_text_input and user_text_input.strip():
+            # 有用户输入的文本
+            if task_type != "auto":
+                user_text = f"参考以下文本描述：\n{user_text_input.strip()}\n\n请结合提供的{total_images}张图片，根据任务类型「{task_type}」的要求，生成对应的提示词。{lang_instruction}"
             else:
-                user_text = f"请分析提供的{total_images}张图片，根据任务类型「{task_type}」的要求，生成对应的提示词。{lang_instruction}"
+                user_text = f"参考以下文本描述：\n{user_text_input.strip()}\n\n请结合提供的{total_images}张图片内容，生成详细的AI生成提示词。{lang_instruction}"
         else:
-            if video_frames and total_images > len(images):
-                user_text = f"请分析提供的{total_images}张图片（含视频首尾帧）内容，生成详细的AI生成提示词。{lang_instruction}"
+            # 没有用户输入的文本
+            if task_type != "auto":
+                user_text = f"请分析提供的{total_images}张图片，根据任务类型「{task_type}」的要求，生成对应的提示词。{lang_instruction}"
             else:
                 user_text = f"请分析提供的{total_images}张图片内容，生成详细的AI生成提示词。{lang_instruction}"
 
@@ -407,31 +383,22 @@ class ModelScopeAPICaptionNode:
         return template_output, chinese_caption, english_caption
 
     def generate_caption(self, api_config, image1=None, image2=None, image3=None,
-                         image4=None, image5=None, video_batch=None, task_type="auto", language="both"):
+                         image4=None, image5=None, text="", task_type="auto", language="both"):
         """通过魔搭 API 生成图像描述"""
         try:
             # 收集所有输入的图片
             images = [img for img in [image1, image2, image3, image4, image5] if img is not None]
 
-            # 处理视频批次：提取首尾帧
-            video_frames = None
-            if video_batch is not None and len(video_batch) > 0:
-                first_frame, last_frame = self.extract_first_last_frames(video_batch)
-                if first_frame is not None and last_frame is not None:
-                    video_frames = [first_frame, last_frame]
-                    print(f"[QwenCLIP] 已从视频批次提取首尾帧")
+            # 检查是否有有效输入（图片或文本）
+            if not images and not text.strip():
+                raise Exception("请至少提供一张图片或输入文本描述")
 
-            # 检查是否有有效输入
-            if not images and not video_frames:
-                raise Exception("请至少提供一张图片或一个视频批次")
-
-            # 如果只有视频没有图片，自动设置任务类型为视频相关
-            if video_frames and not images and task_type == "auto":
-                task_type = "t2v"
-                print(f"[QwenCLIP] 检测到视频输入，自动切换任务类型为: t2v")
+            # 如果只有文本没有图片，打印提示
+            if not images and text.strip():
+                print(f"[QwenCLIP] 仅输入文本模式")
 
             # 构建消息
-            messages = self.build_messages(images, task_type, language, video_frames)
+            messages = self.build_messages(images, task_type, language, text)
 
             # 调用 API
             result = self.call_api(api_config, messages)
