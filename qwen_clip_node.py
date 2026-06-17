@@ -7,14 +7,6 @@ from PIL import Image
 import folder_paths
 import requests as req
 
-# 视频处理依赖（ComfyUI 通常自带 cv2）
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-    print("[QwenCLIP] 警告: opencv-python 未安装，视频功能将不可用。请运行: pip install opencv-python")
-
 
 # ========== 模板定义 ==========
 # 根据提示词模板.txt 提取的各任务类型系统提示词
@@ -242,10 +234,8 @@ class ModelScopeAPICaptionNode:
                 "image3": ("IMAGE",),
                 "image4": ("IMAGE",),
                 "image5": ("IMAGE",),
-                "video": ("STRING", {
-                    "default": "",
-                    "tooltip": "视频文件路径（支持mp4/avi/mov等格式）。输入视频后将自动提取首尾帧进行分析",
-                    "forceInput": True
+                "video_batch": ("IMAGE", {
+                    "tooltip": "视频拆帧后的图像批次（如使用VHS的Video Loader节点）。将自动取首帧和尾帧进行分析"
                 }),
                 "task_type": (["auto", "t2i", "t2v", "i2i", "i2v", "r2i", "r2v", "v2v", "vi2v", "rv2v", "ads2v"], {
                     "default": "auto"
@@ -280,63 +270,21 @@ class ModelScopeAPICaptionNode:
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
 
-    def pil_image_to_base64_url(self, pil_image):
-        """将 PIL Image 转换为 base64 data URL"""
-        # 缩放到最大 1024 边长
-        max_size = 1024
-        w, h = pil_image.size
-        if max(w, h) > max_size:
-            ratio = max_size / max(w, h)
-            pil_image = pil_image.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    def extract_first_last_frames(self, video_batch):
+        """从图像批次中提取首帧和尾帧"""
+        if video_batch is None or len(video_batch) == 0:
+            return None, None
 
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format="JPEG", quality=85)
-        b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        return f"data:image/jpeg;base64,{b64_str}"
+        batch_size = len(video_batch)
+        print(f"[QwenCLIP] 视频批次大小: {batch_size} 帧")
 
-    def extract_video_frames(self, video_path):
-        """从视频中提取首帧和尾帧"""
-        if not CV2_AVAILABLE:
-            raise Exception("opencv-python 未安装，无法处理视频。请运行: pip install opencv-python")
+        # 取第一帧
+        first_frame = video_batch[0:1]  # 保持 batch 维度
 
-        if not video_path or not os.path.exists(video_path):
-            raise Exception(f"视频文件不存在: {video_path}")
+        # 取最后一帧
+        last_frame = video_batch[-1:]  # 保持 batch 维度
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise Exception(f"无法打开视频文件: {video_path}")
-
-        try:
-            # 获取视频总帧数
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                raise Exception("视频文件为空或无法读取帧数")
-
-            # 读取首帧
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, first_frame = cap.read()
-            if not ret:
-                raise Exception("无法读取视频首帧")
-
-            # 读取尾帧
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames - 1))
-            ret, last_frame = cap.read()
-            if not ret:
-                # 如果尾帧读取失败，使用首帧
-                last_frame = first_frame
-
-            # 转换 BGR -> RGB -> PIL Image
-            first_rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
-            last_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
-
-            first_pil = Image.fromarray(first_rgb)
-            last_pil = Image.fromarray(last_rgb)
-
-            print(f"[QwenCLIP] 视频帧提取完成: 总帧数={total_frames}, 分辨率={first_pil.size}")
-            return first_pil, last_pil
-
-        finally:
-            cap.release()
+        return first_frame, last_frame
 
     def build_messages(self, images, task_type, language, video_frames=None):
         """根据任务类型和图片构建 API 消息"""
@@ -351,12 +299,13 @@ class ModelScopeAPICaptionNode:
 
         # 添加视频帧（如果有）
         if video_frames:
-            for pil_img in video_frames:
-                img_url = self.pil_image_to_base64_url(pil_img)
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": img_url}
-                })
+            for frame_tensor in video_frames:
+                if frame_tensor is not None:
+                    img_url = self.image_to_base64_url(frame_tensor)
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": img_url}
+                    })
 
         # 添加普通图片输入
         for img in images:
@@ -458,24 +407,23 @@ class ModelScopeAPICaptionNode:
         return template_output, chinese_caption, english_caption
 
     def generate_caption(self, api_config, image1=None, image2=None, image3=None,
-                         image4=None, image5=None, video="", task_type="auto", language="both"):
+                         image4=None, image5=None, video_batch=None, task_type="auto", language="both"):
         """通过魔搭 API 生成图像描述"""
         try:
             # 收集所有输入的图片
             images = [img for img in [image1, image2, image3, image4, image5] if img is not None]
 
-            # 处理视频输入：提取首尾帧
+            # 处理视频批次：提取首尾帧
             video_frames = None
-            if video and video.strip():
-                video_path = video.strip()
-                print(f"[QwenCLIP] 检测到视频输入: {video_path}")
-                first_pil, last_pil = self.extract_video_frames(video_path)
-                video_frames = [first_pil, last_pil]
-                print(f"[QwenCLIP] 已提取视频首尾帧")
+            if video_batch is not None and len(video_batch) > 0:
+                first_frame, last_frame = self.extract_first_last_frames(video_batch)
+                if first_frame is not None and last_frame is not None:
+                    video_frames = [first_frame, last_frame]
+                    print(f"[QwenCLIP] 已从视频批次提取首尾帧")
 
             # 检查是否有有效输入
             if not images and not video_frames:
-                raise Exception("请至少提供一张图片或一个视频文件")
+                raise Exception("请至少提供一张图片或一个视频批次")
 
             # 如果只有视频没有图片，自动设置任务类型为视频相关
             if video_frames and not images and task_type == "auto":
