@@ -1,155 +1,57 @@
-# 节点使用示例
+# LLM 模型配置节点 (`LLMLoaderNode`)
 
-## 基础连接方式
+**原名**：`ModelScopeAPILoaderNode` → 魔搭 API 配置  
+**新名**：`LLMLoaderNode` → LLM 模型配置  
+（相关实现位于 `qwen_clip_node.py`）
 
-### 1. 单张图片反推提示词
+---
 
-```
-┌─────────────────────┐
-│  加载 Qwen 模型     │
-│  (QwenModelLoader)  │
-├─────────────────────┤
-│  model_type: qwen2.5-vl-7b-instruct  │
-│  device_map: auto    │
-│  precision: float16  │
-└─────────┬───────────┘
-          │ model
-          ▼
-┌─────────────────────┐      ┌─────────────────────┐
-│  Load Image         │      │  反推提示词          │
-│  (加载图片)          │      │  (QwenCaption)      │
-├─────────────────────┤      ├─────────────────────┤
-│                     │─ ─ ─▶│  image1             │
-│  image: [你的图片]   │      │  task_type: auto    │
-└─────────────────────┘      │  language: both     │
-                             │  use_template: True │
-                             └─────────┬───────────┘
-                                       │
-                          ┌────────────┼────────────┐
-                          ▼            ▼            ▼
-                    caption_combined  caption_chinese  caption_english
-```
+## 输入接口
 
-### 2. 多张图片综合分析
+| 参数      | 类型     | 说明                             |
+|-----------|----------|----------------------------------|
+| `platform`| 下拉选择 | 选择 API 平台：`ModelScope`、`OnethingAI`、`Custom` |
+| `api_key` | STRING   | API 密钥                         |
+| `model`   | STRING   | 模型名称（可选，留空则使用平台默认模型） |
+| `base_url`| STRING   | API 地址（可选，留空则使用平台默认地址） |
 
-```
-┌─────────────────────┐
-│  加载 Qwen 模型     │
-└─────────┬───────────┘
-          │ model
-          ▼
-┌─────────────────────┐      ┌─────────────────────┐
-│  Load Image 1       │      │                     │
-│  [主体图片]          │─ ─ ─▶│  image1             │
-└─────────────────────┘      │                     │
-                             │                     │
-┌─────────────────────┐      │                     │
-│  Load Image 2       │      │  反推提示词          │
-│  [背景图片]          │─ ─ ─▶│  image2             │
-└─────────────────────┘      │                     │
-                             │  task_type: t2i     │
-┌─────────────────────┐      │                     │
-│  Load Image 3       │      │                     │
-│  [参考风格]          │─ ─ ─▶│  image3             │
-└─────────────────────┘      └─────────┬───────────┘
-                                       │
-                                       ▼
-                                 生成综合提示词
-```
+> **默认行为**  
+> - 下拉选择 `platform` 的默认值为 `ModelScope`。  
+> - 当 `model` 或 `base_url` 留空时，节点会根据所选平台自动填入下表中的默认值。
 
-### 3. 视频分析
+---
 
-```
-┌─────────────────────┐
-│  加载 Qwen 模型     │
-└─────────┬───────────┘
-          │ model
-          ▼
-┌─────────────────────┐      ┌─────────────────────┐
-│  Load Video         │      │                     │
-│  (加载视频)          │─ ─ ─▶│  video              │
-├─────────────────────┤      │                     │
-│  video: [你的视频]   │      │  反推提示词          │
-└─────────────────────┘      │  task_type: t2v     │
-                             │  language: english  │
-                             └─────────┬───────────┘
-                                       │
-                                       ▼
-                                 生成视频描述
-```
+## 平台与默认配置
 
-## 完整工作流示例
+`platform` 选项由代码 `["ModelScope", "OnethingAI", "Custom"]` 定义（见 `qwen_clip_node.py:186-188`）。
 
-### 文生图 (T2I) 工作流
+| 平台       | Base URL                                           | 默认模型                         | 需要 `job_type` |
+|------------|----------------------------------------------------|----------------------------------|:---------------:|
+| ModelScope | `https://api-inference.modelscope.cn/v1`           | `Qwen/Qwen3-VL-8B-Instruct`      | ❌              |
+| OnethingAI | `https://api-model.onethingai.com/v2/generation`   | `doubao-seed-1-6-flash-250615`   | ✅              |
+| Custom     | 用户自定义                                         | 用户自定义                       | ❌              |
 
-```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│ 加载 Qwen   │    │ 加载参考图片  │    │ 反推提示词   │    │  文生图模型   │
-│ 模型         │───▶│              │───▶│              │───▶│  (SD/Flux)   │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
-                                          task_type: t2i
-                                          use_template: True
-```
+> **自定义平台** 要求用户显式提供 `base_url` 与 `model`，不会应用任何默认值。
 
-### 图生视频 (I2V) 工作流
+---
 
-```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│ 加载 Qwen   │    │ 加载图片     │    │ 反推提示词   │    │  图生视频    │
-│ 模型         │───▶│              │───▶│              │───▶│  模型        │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
-                                          task_type: i2v
-```
+## OnethingAI 平台 API 兼容
 
-## 参数说明
+1. **自动添加 `job_type`**  
+   发送请求时，自动在 JSON 体中注入 `"job_type": "chat/completions"` 字段。
 
-### 加载模型节点
+2. **路径拼接规则**  
+   - OnethingAI **直接使用**配置的 `base_url`，**不会**在其后追加 `/chat/completions`。  
+   - 其他平台（包括 ModelScope 和 Custom）会在 `base_url` 后**自动拼接** `/chat/completions`。
 
-| 参数 | 选项 | 说明 |
-|------|------|------|
-| model_type | qwen2.5-vl-7b-instruct | 默认模型 |
-| device_map | auto / cpu / cuda | 设备选择，auto 自动检测 |
-| precision | float16 / bfloat16 / float32 | 精度，float16 最省显存 |
+---
 
-### 反推提示词节点
+## 使用示例
 
-| 参数 | 选项 | 说明 |
-|------|------|------|
-| image1-5 | IMAGE | 最多 5 张图片输入 |
-| video | VIDEO | 视频文件输入 |
-| task_type | auto/t2i/t2v/i2i/i2v/r2i/r2v | 任务类型 |
-| language | both/chinese/english | 输出语言 |
-| use_template | True/False | 是否参考提示词模板 |
-| max_tokens | 256-4096 | 最大生成长度 |
+### OnethingAI 平台
 
-## 输出说明
-
-| 输出 | 类型 | 说明 |
-|------|------|------|
-| caption_combined | STRING | 组合输出，包含中英文 |
-| caption_chinese | STRING | 纯中文提示词 |
-| caption_english | STRING | 纯英文提示词 |
-
-## 提示词模板效果
-
-启用 `use_template` 后，生成的提示词会包含：
-
-- **光线描述**: Edge lighting, soft lighting, hard lighting
-- **光源**: Daylight, Moonlight, Artificial lighting
-- **镜头**: Medium shot, Close-up, Wide shot
-- **构图**: Center composition, Balanced composition
-- **色调**: Warm colors, Cool colors
-- **主体细节**: 外貌、表情、姿态、服装等
-
-示例输出：
-```
-【中文】
-日光，中景镜头，居中构图，暖色调。一位年轻女性站在花园中，身穿白色连衣裙，
-长发披肩，面带微笑。背景是盛开着各色鲜花的花丛，阳光透过树叶洒下斑驳光影。
-
-【English】
-Daylight, medium shot, center composition, warm colors. A young woman stands in
-a garden, wearing a white dress with long hair flowing over her shoulders, smiling
-gently. The background features blooming flowers in various colors, with dappled
-sunlight filtering through the leaves.
-```
+```text
+[LLM 模型配置] → api_config → [反推提示词 (LLM)]
+  platform: OnethingAI
+  api_key: your-api-key
+  model: doubao-seed-1-6-flash-250615  (或留空使用默认)
